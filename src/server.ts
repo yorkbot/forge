@@ -2,6 +2,7 @@ import express from "express";
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
+import { onGameStart, onGameEnd, onDecision, handleChatEvent, ChatEvent } from "./chat";
 
 const app = express();
 app.use(express.json({ limit: "4mb" }));
@@ -145,6 +146,7 @@ app.post("/analyze-deck", async (req, res) => {
   }
 
   log(`DECK-ANALYSIS: gameId=${gameId}, analyzing ${decklist.split('\n').length} cards`);
+  onGameStart(gameId);
 
   // Item 8: Load card skills for this deck immediately
   const cardSkills = loadCardSkillsForDeck(decklist);
@@ -303,6 +305,7 @@ Reply with ONLY the index number of your chosen action. Then on a new line, upda
       if (validOptions.includes(index)) {
         const chosen = options.find(o => o.index === index);
         log(`${method}: chose ${index} — ${chosen?.description} (gameId: ${gameId || 'none'})`);
+        if (gameId) onDecision(gameId, gameState, method, chosen?.description || "");
         res.json({ index, reasoning: reply.trim() });
         return;
       }
@@ -326,4 +329,17 @@ cleanOldNotes();
 
 app.listen(PORT, () => {
   console.log(`Forge LLM bridge on port ${PORT} — routing to OpenClaw agent: ${AGENT}`);
+});
+
+// --- Chat Presence ---
+
+// POST /chat — explicit game event chat triggers
+app.post("/chat", (req, res) => {
+  const evt = req.body as ChatEvent;
+  if (!evt.gameId || !evt.event) {
+    res.status(400).json({ error: "gameId and event required" });
+    return;
+  }
+  const result = handleChatEvent(evt);
+  res.json(result);
 });
