@@ -44,8 +44,10 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
         PlayerControllerAi result;
         if ("true".equals(System.getProperty("forge.llm.enabled"))) {
             result = new PlayerControllerLLM(ai.getGame(), ai, this);
+            System.out.println("[LLM] === LLM Controller created for " + ai.getName() + " ===");
         } else {
             result = new PlayerControllerAi(ai.getGame(), ai, this);
+            System.out.println("[LLM] === Stock AI Controller created (forge.llm.enabled=" + System.getProperty("forge.llm.enabled") + ") ===");
         }
         result.setUseSimulation(useSimulation);
         result.allowCheatShuffle(allowCheatShuffle);
