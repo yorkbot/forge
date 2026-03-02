@@ -9,9 +9,10 @@ app.use(express.json({ limit: "4mb" }));
 const PORT = process.env.PORT || 8080;
 const LOG_FILE = path.join(__dirname, "..", "decisions.log");
 const NOTES_DIR = path.join(__dirname, "..", "game-notes");
+const CARD_SKILLS_DIR = path.join("/home/york/.openclaw/workspace-mtg/card-skills");
 const AGENT = process.env.OPENCLAW_AGENT || "mtg";
 
-// Ensure game notes directory exists
+// Ensure directories exist
 if (!fs.existsSync(NOTES_DIR)) {
   fs.mkdirSync(NOTES_DIR, { recursive: true });
 }
@@ -27,6 +28,7 @@ interface DecideRequest {
   gameState: string;
   options: Option[];
   context: string;
+  turnLog?: string[];  // Item 7: running turn summaries
 }
 
 interface AnalyzeDeckRequest {
@@ -63,6 +65,61 @@ function readDeckStrategy(gameId: string): string {
   return "";
 }
 
+function getCardSkillsPath(gameId: string): string {
+  return path.join(NOTES_DIR, `${gameId}-skills.md`);
+}
+
+function readCardSkills(gameId: string): string {
+  const skillsPath = getCardSkillsPath(gameId);
+  if (fs.existsSync(skillsPath)) {
+    return fs.readFileSync(skillsPath, "utf-8");
+  }
+  return "";
+}
+
+/**
+ * Item 8: Load card skill files matching cards in a decklist.
+ * Converts card names to kebab-case filenames and checks for matching files.
+ */
+function loadCardSkillsForDeck(decklist: string, opponentCards: string[] = []): string {
+  if (!fs.existsSync(CARD_SKILLS_DIR)) {
+    return "";
+  }
+
+  const allCards = new Set<string>();
+
+  // Parse decklist (format: "Card Name [cost] P/T")
+  for (const line of decklist.split("\n")) {
+    const cardName = line.trim().split(" [")[0].split(" {")[0].trim();
+    if (cardName) allCards.add(cardName);
+  }
+
+  // Also check opponent's revealed cards
+  for (const card of opponentCards) {
+    allCards.add(card.trim());
+  }
+
+  const loadedSkills: string[] = [];
+
+  for (const cardName of allCards) {
+    // Convert "Splinter Twin" -> "splinter-twin"
+    const filename = cardName
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, "")
+      .trim()
+      .replace(/\s+/g, "-") + ".md";
+
+    const skillPath = path.join(CARD_SKILLS_DIR, filename);
+    if (fs.existsSync(skillPath)) {
+      const content = fs.readFileSync(skillPath, "utf-8");
+      loadedSkills.push(content);
+      log(`CARD-SKILL: loaded ${filename} for game`);
+    }
+  }
+
+  return loadedSkills.join("\n\n---\n\n");
+}
+
 // Clean up old game notes (older than 24h)
 function cleanOldNotes() {
   try {
@@ -78,7 +135,7 @@ function cleanOldNotes() {
   } catch (_) {}
 }
 
-// POST /analyze-deck — called at game start, generates strategy
+// POST /analyze-deck — called at game start, generates strategy and loads card skills
 app.post("/analyze-deck", async (req, res) => {
   const { gameId, decklist } = req.body as AnalyzeDeckRequest;
 
@@ -88,6 +145,14 @@ app.post("/analyze-deck", async (req, res) => {
   }
 
   log(`DECK-ANALYSIS: gameId=${gameId}, analyzing ${decklist.split('\n').length} cards`);
+
+  // Item 8: Load card skills for this deck immediately
+  const cardSkills = loadCardSkillsForDeck(decklist);
+  if (cardSkills) {
+    const skillsPath = getCardSkillsPath(gameId);
+    fs.writeFileSync(skillsPath, `# Card Skills — Game ${gameId}\n\nThe following cards in your deck have specific strategy notes:\n\n${cardSkills}\n`);
+    log(`CARD-SKILLS: loaded skills for game ${gameId}`);
+  }
 
   const message = `[MTG Deck Analysis] You are about to play a game with this deck. Analyze it and write a concise game plan.
 
@@ -127,7 +192,7 @@ Be specific about card names. This plan will be referenced in every future decis
 });
 
 app.post("/decide", async (req, res) => {
-  const { gameId, method, gameState, options, context } = req.body as DecideRequest;
+  const { gameId, method, gameState, options, context, turnLog } = req.body as DecideRequest;
 
   // Auto-pick if only one option
   if (options && options.length === 1) {
@@ -150,11 +215,11 @@ app.post("/decide", async (req, res) => {
   // Load game-level context
   const deckStrategy = gameId ? readDeckStrategy(gameId) : "";
   const gameNotes = gameId ? readGameNotes(gameId) : "";
+  const cardSkills = gameId ? readCardSkills(gameId) : "";
 
   // Build strategic framing based on game state
   let strategicFrame = "";
   if (gameState) {
-    // Simple heuristics for strategic framing
     const aiLifeMatch = gameState.match(/- AI: (\d+)/);
     const oppLifeMatch = gameState.match(/- Opponent[^:]*: (\d+)/);
     if (aiLifeMatch && oppLifeMatch) {
@@ -172,6 +237,17 @@ app.post("/decide", async (req, res) => {
 
   if (deckStrategy) {
     sections.push(`## Your Game Plan\n${deckStrategy}`);
+  }
+
+  // Item 8: Card skills — specific strategy for key cards in deck
+  if (cardSkills) {
+    sections.push(`## Card Skills (Key Strategy Notes)\n${cardSkills}`);
+  }
+
+  // Item 7: Turn-by-turn narrative log
+  if (turnLog && turnLog.length > 0) {
+    const recentTurns = turnLog.slice(-8); // last 8 turns to avoid prompt bloat
+    sections.push(`## Game Narrative (Turn Log)\n${recentTurns.join("\n")}`);
   }
 
   if (gameNotes) {
