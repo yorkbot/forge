@@ -42,6 +42,11 @@ public class PlayerControllerLLM extends PlayerControllerAi {
     /** Unique ID for this game instance — sent with every request for server-side game notes. */
     private final String gameId = UUID.randomUUID().toString().substring(0, 8);
 
+    // Item 7: Turn-by-turn narrative log
+    private final List<String> turnLog = new ArrayList<>();
+    private int lastTrackedTurn = -1;
+    private final List<String> currentTurnEvents = new ArrayList<>();
+
     public PlayerControllerLLM(Game game, Player p, LobbyPlayer lp) {
         super(game, p, lp);
         // Kick off deck analysis asynchronously so game start isn't delayed
@@ -134,6 +139,38 @@ public class PlayerControllerLLM extends PlayerControllerAi {
             }
         }
         return false;
+    }
+
+    // --- Turn log tracking (Item 7) ---
+
+    /**
+     * Check if the turn number has advanced. If so, finalize the last turn's summary.
+     */
+    private void checkTurnBoundary() {
+        int currentTurn = player.getGame().getPhaseHandler().getTurn();
+        if (lastTrackedTurn == -1) {
+            lastTrackedTurn = currentTurn;
+            return;
+        }
+        if (currentTurn != lastTrackedTurn) {
+            if (!currentTurnEvents.isEmpty()) {
+                Player active = player.getGame().getPhaseHandler().getPlayerTurn();
+                String whose = (active == player) ? "AI" : "Opponent";
+                String summary = "Turn " + lastTrackedTurn + " (" + whose + "): "
+                        + String.join("; ", currentTurnEvents);
+                turnLog.add(summary);
+                while (turnLog.size() > 12) turnLog.remove(0);
+            }
+            currentTurnEvents.clear();
+            lastTrackedTurn = currentTurn;
+        }
+    }
+
+    /** Record an event for the current turn narrative. */
+    private void recordEvent(String event) {
+        if (event != null && !event.isEmpty()) {
+            currentTurnEvents.add(event);
+        }
     }
 
     // --- HTTP helper ---
@@ -285,12 +322,18 @@ public class PlayerControllerLLM extends PlayerControllerAi {
                 for (Card c : canAttack) {
                     combat.addAttacker(c, defender);
                 }
+                // Record attack
+                StringBuilder attackDesc = new StringBuilder("attacked with all:");
+                for (Card c : canAttack) attackDesc.append(" ").append(c.getName());
+                recordEvent(attackDesc.toString());
                 return;
             } else {
                 int creatureIdx = resp.index - 2;
                 if (creatureIdx >= 0 && creatureIdx < canAttack.size()) {
                     GameEntity defender = combat.getDefenders().iterator().next();
-                    combat.addAttacker(canAttack.get(creatureIdx), defender);
+                    Card attackCard = canAttack.get(creatureIdx);
+                    combat.addAttacker(attackCard, defender);
+                    recordEvent("attacked with " + attackCard.getName());
                     return;
                 }
             }
@@ -340,7 +383,10 @@ public class PlayerControllerLLM extends PlayerControllerAi {
             int blockerIdx = pairIdx / attackers.size();
             int attackerIdx = pairIdx % attackers.size();
             if (blockerIdx < canBlock.size() && attackerIdx < attackers.size()) {
-                combat.addBlocker(canBlock.get(blockerIdx), attackers.get(attackerIdx));
+                Card blocker = canBlock.get(blockerIdx);
+                Card atk = attackers.get(attackerIdx);
+                combat.addBlocker(blocker, atk);
+                recordEvent("blocked " + atk.getName() + " with " + blocker.getName());
                 return;
             }
         }
@@ -583,8 +629,12 @@ public class PlayerControllerLLM extends PlayerControllerAi {
         DecisionResponse resp = callDecisionServer("chooseSpellAbilityToPlay", getGameState(), options,
                 "Choose what to play. Option 0 passes priority.");
         if (resp != null && resp.index > 0 && resp.index <= nonManaPlayable.size()) {
+            SpellAbility chosen = nonManaPlayable.get(resp.index - 1);
+            // Record for turn narrative
+            String cardName = chosen.getHostCard() != null ? chosen.getHostCard().getName() : chosen.toString();
+            recordEvent("played " + cardName);
             List<SpellAbility> result = new ArrayList<>();
-            result.add(nonManaPlayable.get(resp.index - 1));
+            result.add(chosen);
             return result;
         } else if (resp != null && resp.index == 0) {
             return null;
