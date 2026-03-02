@@ -1,0 +1,69 @@
+package forge.ai;
+
+import java.util.Set;
+
+import forge.LobbyPlayer;
+import forge.game.Game;
+import forge.game.player.IGameEntitiesFactory;
+import forge.game.player.Player;
+import forge.game.player.PlayerController;
+
+/**
+ * LobbyPlayer that creates LLM-powered AI controllers.
+ * Drop-in replacement for LobbyPlayerAi.
+ */
+public class LobbyPlayerLLM extends LobbyPlayer implements IGameEntitiesFactory {
+
+    private String aiProfile = "";
+    private boolean rotateProfileEachGame;
+    private boolean allowCheatShuffle;
+    private boolean useSimulation;
+
+    public LobbyPlayerLLM(String name, Set<AIOption> options) {
+        super(name);
+        if (options != null && options.contains(AIOption.USE_SIMULATION)) {
+            this.useSimulation = true;
+        }
+    }
+
+    public void setAiProfile(String profileName) {
+        aiProfile = profileName;
+    }
+    public String getAiProfile() {
+        return aiProfile;
+    }
+
+    public void setRotateProfileEachGame(boolean rotateProfileEachGame) {
+        this.rotateProfileEachGame = rotateProfileEachGame;
+    }
+
+    public void setAllowCheatShuffle(boolean allowCheatShuffle) {
+        this.allowCheatShuffle = allowCheatShuffle;
+    }
+
+    private PlayerControllerLLM createControllerFor(Player ai) {
+        PlayerControllerLLM result = new PlayerControllerLLM(ai.getGame(), ai, this);
+        result.setUseSimulation(useSimulation);
+        result.allowCheatShuffle(allowCheatShuffle);
+        return result;
+    }
+
+    @Override
+    public PlayerController createMindSlaveController(Player master, Player slave) {
+        return createControllerFor(slave);
+    }
+
+    @Override
+    public Player createIngamePlayer(Game game, final int id) {
+        Player ai = new Player(getName(), game, id);
+        ai.setFirstController(createControllerFor(ai));
+
+        if (rotateProfileEachGame) {
+            setAiProfile(AiProfileUtil.getRandomProfile());
+        }
+        return ai;
+    }
+
+    @Override
+    public void hear(LobbyPlayer player, String message) { /* LLM AI is deaf. */ }
+}
