@@ -442,4 +442,42 @@ public class PlayerControllerLLM extends PlayerControllerAi {
         }
         return sb.toString();
     }
+
+    @Override
+    public List<SpellAbility> chooseSpellAbilityToPlay() {
+        List<SpellAbility> allPlayable = new ArrayList<>();
+        for (Card c : player.getCardsIn(forge.game.zone.ZoneType.Hand)) {
+            for (SpellAbility sa : c.getAllPossibleAbilities(player, false)) {
+                if (sa.canPlay()) { allPlayable.add(sa); }
+            }
+        }
+        for (Card c : player.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+            for (SpellAbility sa : c.getAllPossibleAbilities(player, false)) {
+                if (sa.canPlay() && !sa.isLandAbility()) { allPlayable.add(sa); }
+            }
+        }
+        CardCollection lands = ComputerUtilAbility.getAvailableLandsToPlay(player.getGame(), player);
+        if (lands != null) {
+            for (Card land : lands) {
+                for (SpellAbility sa : land.getAllPossibleAbilities(player, true)) {
+                    if (sa.isLandAbility()) { allPlayable.add(sa); }
+                }
+            }
+        }
+        if (allPlayable.isEmpty()) { return null; }
+        List<OptionEntry> options = new ArrayList<>();
+        options.add(new OptionEntry(0, "Pass priority (do nothing)"));
+        for (int i = 0; i < allPlayable.size(); i++) {
+            SpellAbility sa = allPlayable.get(i);
+            String desc = sa.getHostCard() != null ? sa.getHostCard().getName() + " - " + sa.toString() : sa.toString();
+            options.add(new OptionEntry(i + 1, desc));
+        }
+        DecisionResponse resp = callDecisionServer("chooseSpellAbilityToPlay", getGameState(), options, "Choose what to play. Option 0 passes.");
+        if (resp != null && resp.index > 0 && resp.index <= allPlayable.size()) {
+            List<SpellAbility> result = new ArrayList<>();
+            result.add(allPlayable.get(resp.index - 1));
+            return result;
+        } else if (resp != null && resp.index == 0) { return null; }
+        return super.chooseSpellAbilityToPlay();
+    }
 }
