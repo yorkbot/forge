@@ -8,6 +8,7 @@ import forge.game.card.CardCollection;
 import forge.game.card.CardCollectionView;
 import forge.game.combat.Combat;
 import forge.game.combat.CombatUtil;
+import forge.game.phase.PhaseType;
 import forge.game.player.DelayedReveal;
 import forge.game.player.Player;
 import forge.game.player.PlayerActionConfirmMode;
@@ -23,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.UUID;
 
 /**
  * LLM-powered player controller for Forge.
@@ -37,8 +39,101 @@ public class PlayerControllerLLM extends PlayerControllerAi {
     private static final String SERVER_URL = System.getProperty("forge.llm.url", "http://localhost:8080");
     private static final int TIMEOUT_MS = 30000;
 
+    /** Unique ID for this game instance — sent with every request for server-side game notes. */
+    private final String gameId = UUID.randomUUID().toString().substring(0, 8);
+
     public PlayerControllerLLM(Game game, Player p, LobbyPlayer lp) {
         super(game, p, lp);
+        // Kick off deck analysis asynchronously so game start isn't delayed
+        analyzeDeckAsync();
+    }
+
+    // --- Deck analysis ---
+
+    private void analyzeDeckAsync() {
+        Thread t = new Thread(() -> {
+            try {
+                CardCollectionView deck = player.getCardsIn(forge.game.zone.ZoneType.Library);
+                if (deck.isEmpty()) return;
+
+                StringBuilder deckList = new StringBuilder();
+                for (Card c : deck) {
+                    deckList.append(c.getName());
+                    if (c.getManaCost() != null && !c.getManaCost().isNoCost()) {
+                        deckList.append(" [").append(c.getManaCost()).append("]");
+                    }
+                    if (c.isCreature()) {
+                        deckList.append(" ").append(c.getNetPower()).append("/").append(c.getNetToughness());
+                    }
+                    deckList.append("\n");
+                }
+
+                StringBuilder json = new StringBuilder();
+                json.append("{");
+                json.append("\"gameId\":").append(jsonString(gameId)).append(",");
+                json.append("\"decklist\":").append(jsonString(deckList.toString()));
+                json.append("}");
+
+                URL url = new URL(SERVER_URL + "/analyze-deck");
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(60000);
+                conn.setReadTimeout(60000);
+
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(json.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                int status = conn.getResponseCode();
+                System.out.println("[LLM] Deck analysis response: HTTP " + status);
+            } catch (Exception e) {
+                System.err.println("[LLM] Deck analysis failed: " + e.getMessage());
+            }
+        }, "LLM-DeckAnalysis");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // --- Smart auto-pass logic ---
+
+    /**
+     * Returns true if this is a trivial priority — only pass and mana abilities available,
+     * or opponent's turn with no instant-speed plays.
+     */
+    private boolean shouldAutoPass(List<OptionEntry> options, String method) {
+        // If it's a "chooseSpellAbilityToPlay" call with only pass + mana abilities → auto-pass
+        if ("chooseSpellAbilityToPlay".equals(method)) {
+            // Check if opponent's turn during a non-instant phase
+            Player active = player.getGame().getPhaseHandler().getPlayerTurn();
+            PhaseType phase = player.getGame().getPhaseHandler().getPhase();
+            boolean isOpponentTurn = (active != null && active != player);
+            boolean isInstantWindow = isOpponentTurn || phase == PhaseType.END_OF_TURN
+                    || phase == PhaseType.COMBAT_DECLARE_ATTACKERS
+                    || phase == PhaseType.COMBAT_DECLARE_BLOCKERS;
+
+            // If only option is pass (index 0), auto-pass regardless
+            if (options.size() == 1 && options.get(0).index == 0) {
+                return true;
+            }
+
+            // During opponent's main phase with no instant-speed plays, auto-pass
+            if (isOpponentTurn && (phase == PhaseType.MAIN1 || phase == PhaseType.MAIN2)) {
+                // Check if any non-pass option is instant speed
+                boolean hasInstantPlay = false;
+                for (OptionEntry opt : options) {
+                    if (opt.index > 0) {
+                        hasInstantPlay = true;
+                        break;
+                    }
+                }
+                // If no real plays during opp's main, auto-pass
+                // We still let the LLM decide if there ARE instant-speed plays
+                return !hasInstantPlay;
+            }
+        }
+        return false;
     }
 
     // --- HTTP helper ---
@@ -53,9 +148,19 @@ public class PlayerControllerLLM extends PlayerControllerAi {
      * Returns -1 on failure.
      */
     private DecisionResponse callDecisionServer(String method, String gameState, List<OptionEntry> options, String context) {
+        // Smart auto-pass check
+        if (shouldAutoPass(options, method)) {
+            System.out.println("[LLM] Auto-pass: " + method);
+            DecisionResponse r = new DecisionResponse();
+            r.index = 0; // pass
+            r.reasoning = "auto-pass";
+            return r;
+        }
+
         try {
             StringBuilder json = new StringBuilder();
             json.append("{");
+            json.append("\"gameId\":").append(jsonString(gameId)).append(",");
             json.append("\"method\":").append(jsonString(method)).append(",");
             json.append("\"gameState\":").append(jsonString(gameState)).append(",");
             json.append("\"context\":").append(jsonString(context)).append(",");
@@ -149,8 +254,6 @@ public class PlayerControllerLLM extends PlayerControllerAi {
         }
 
         List<OptionEntry> options = new ArrayList<>();
-        // Build a list of possible attackers, let LLM pick which to send
-        // Option 0: attack with all, then individual creatures
         StringBuilder allDesc = new StringBuilder("Attack with all: ");
         List<Card> canAttack = new ArrayList<>();
         for (Card c : creatures) {
@@ -176,10 +279,8 @@ public class PlayerControllerLLM extends PlayerControllerAi {
                 "Choose attackers. You can pick all, none, or specific creatures.");
         if (resp != null) {
             if (resp.index == 0) {
-                // Don't attack — do nothing
                 return;
             } else if (resp.index == 1) {
-                // Attack with all
                 GameEntity defender = combat.getDefenders().iterator().next();
                 for (Card c : canAttack) {
                     combat.addAttacker(c, defender);
@@ -194,7 +295,6 @@ public class PlayerControllerLLM extends PlayerControllerAi {
                 }
             }
         }
-        // Fallback to stock AI
         super.declareAttackers(attacker, combat);
     }
 
@@ -234,9 +334,8 @@ public class PlayerControllerLLM extends PlayerControllerAi {
                 "Choose blocking assignments.");
         if (resp != null) {
             if (resp.index == 0) {
-                return; // No blocks
+                return;
             }
-            // Decode the blocker/attacker pair
             int pairIdx = resp.index - 1;
             int blockerIdx = pairIdx / attackers.size();
             int attackerIdx = pairIdx % attackers.size();
@@ -245,7 +344,6 @@ public class PlayerControllerLLM extends PlayerControllerAi {
                 return;
             }
         }
-        // Fallback
         super.declareBlockers(defender, combat);
     }
 
@@ -312,7 +410,6 @@ public class PlayerControllerLLM extends PlayerControllerAi {
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
         if (topN.size() <= 1) {
-            // For single card, still ask LLM
             List<OptionEntry> options = new ArrayList<>();
             options.add(new OptionEntry(0, "Keep on top: " + (topN.isEmpty() ? "none" : topN.get(0).getName())));
             options.add(new OptionEntry(1, "Put on bottom: " + (topN.isEmpty() ? "none" : topN.get(0).getName())));
@@ -330,7 +427,6 @@ public class PlayerControllerLLM extends PlayerControllerAi {
             }
         }
 
-        // For multiple cards, ask per card
         CardCollection top = new CardCollection();
         CardCollection bottom = new CardCollection();
         for (Card c : topN) {
@@ -366,7 +462,6 @@ public class PlayerControllerLLM extends PlayerControllerAi {
         if (resp != null && resp.index >= 0 && resp.index < validCards.size()) {
             CardCollection result = new CardCollection();
             result.add(validCards.get(resp.index));
-            // If need more discards and min > 1, fall back to super for the rest
             if (min > 1) {
                 CardCollection remaining = new CardCollection(validCards);
                 remaining.remove(validCards.get(resp.index));
@@ -412,7 +507,6 @@ public class PlayerControllerLLM extends PlayerControllerAi {
         int idx = json.indexOf(search);
         if (idx == -1) return -1;
         idx += search.length();
-        // skip whitespace
         while (idx < json.length() && Character.isWhitespace(json.charAt(idx))) idx++;
         StringBuilder num = new StringBuilder();
         while (idx < json.length() && (Character.isDigit(json.charAt(idx)) || json.charAt(idx) == '-')) {
@@ -464,20 +558,37 @@ public class PlayerControllerLLM extends PlayerControllerAi {
                 }
             }
         }
-        if (allPlayable.isEmpty()) { return null; }
+
+        // Filter out pure mana abilities — they're not meaningful decisions
+        List<SpellAbility> nonManaPlayable = new ArrayList<>();
+        for (SpellAbility sa : allPlayable) {
+            if (!sa.isManaAbility()) {
+                nonManaPlayable.add(sa);
+            }
+        }
+
+        if (nonManaPlayable.isEmpty()) {
+            // Only mana abilities available — auto-pass
+            return null;
+        }
+
         List<OptionEntry> options = new ArrayList<>();
         options.add(new OptionEntry(0, "Pass priority (do nothing)"));
-        for (int i = 0; i < allPlayable.size(); i++) {
-            SpellAbility sa = allPlayable.get(i);
+        for (int i = 0; i < nonManaPlayable.size(); i++) {
+            SpellAbility sa = nonManaPlayable.get(i);
             String desc = sa.getHostCard() != null ? sa.getHostCard().getName() + " - " + sa.toString() : sa.toString();
             options.add(new OptionEntry(i + 1, desc));
         }
-        DecisionResponse resp = callDecisionServer("chooseSpellAbilityToPlay", getGameState(), options, "Choose what to play. Option 0 passes.");
-        if (resp != null && resp.index > 0 && resp.index <= allPlayable.size()) {
+
+        DecisionResponse resp = callDecisionServer("chooseSpellAbilityToPlay", getGameState(), options,
+                "Choose what to play. Option 0 passes priority.");
+        if (resp != null && resp.index > 0 && resp.index <= nonManaPlayable.size()) {
             List<SpellAbility> result = new ArrayList<>();
-            result.add(allPlayable.get(resp.index - 1));
+            result.add(nonManaPlayable.get(resp.index - 1));
             return result;
-        } else if (resp != null && resp.index == 0) { return null; }
+        } else if (resp != null && resp.index == 0) {
+            return null;
+        }
         return super.chooseSpellAbilityToPlay();
     }
 }
