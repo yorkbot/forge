@@ -185,6 +185,9 @@ public class PlayerControllerLLM extends PlayerControllerAi {
      * Returns -1 on failure.
      */
     private DecisionResponse callDecisionServer(String method, String gameState, List<OptionEntry> options, String context) {
+        // Update turn narrative tracking
+        checkTurnBoundary();
+
         // Smart auto-pass check
         if (shouldAutoPass(options, method)) {
             System.out.println("[LLM] Auto-pass: " + method);
@@ -201,6 +204,17 @@ public class PlayerControllerLLM extends PlayerControllerAi {
             json.append("\"method\":").append(jsonString(method)).append(",");
             json.append("\"gameState\":").append(jsonString(gameState)).append(",");
             json.append("\"context\":").append(jsonString(context)).append(",");
+
+            // Include turn-by-turn narrative log
+            if (!turnLog.isEmpty()) {
+                json.append("\"turnLog\":[");
+                for (int i = 0; i < turnLog.size(); i++) {
+                    if (i > 0) json.append(",");
+                    json.append(jsonString(turnLog.get(i)));
+                }
+                json.append("],");
+            }
+
             json.append("\"options\":[");
             for (int i = 0; i < options.size(); i++) {
                 if (i > 0) json.append(",");
