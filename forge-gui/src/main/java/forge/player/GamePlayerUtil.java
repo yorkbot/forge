@@ -4,7 +4,6 @@ import forge.LobbyPlayer;
 import forge.ai.AIOption;
 import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
-import forge.ai.LobbyPlayerLLM;
 import forge.gui.GuiBase;
 import forge.gui.util.SOptionPane;
 import forge.localinstance.properties.ForgeNetPreferences;
@@ -69,15 +68,6 @@ public final class GamePlayerUtil {
         return createAiPlayer(name, avatarIndex, sleeveIndex, options, "");
     }
     public static LobbyPlayer createAiPlayer(final String name, final int avatarIndex, final int sleeveIndex, final Set<AIOption> options, final String profileOverride) {
-        // Use LLM-powered AI when forge.llm.enabled is set
-        if ("true".equalsIgnoreCase(System.getProperty("forge.llm.enabled"))) {
-            final LobbyPlayerLLM llmPlayer = new LobbyPlayerLLM(name, options);
-            llmPlayer.setAvatarIndex(avatarIndex);
-            llmPlayer.setSleeveIndex(sleeveIndex);
-            Logger.info("[LLM] Creating LLM-powered AI player: " + name);
-            return llmPlayer;
-        }
-
         final LobbyPlayerAi player = new LobbyPlayerAi(name, options);
 
         // TODO: implement specific AI profiles for quest mode.
